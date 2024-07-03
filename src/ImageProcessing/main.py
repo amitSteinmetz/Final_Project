@@ -32,6 +32,8 @@ def main():
     df.to_excel('output_filename.xlsx', index=False, engine='openpyxl')
     print(df)
 
+    x = 4
+
 
 if __name__ == "__main__":
     main()
