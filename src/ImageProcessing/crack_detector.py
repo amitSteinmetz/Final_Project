@@ -10,7 +10,7 @@ from skimage.morphology import skeletonize
 
 
 class CrackDetector:
-    def _init_(self, image_path):
+    def __init__(self, image_path):
         self.image_path = image_path
         self.fudgefactor = 5
         self.sigma = 200
@@ -66,7 +66,7 @@ class CrackDetector:
 
             rect = cv2.minAreaRect(crack_contour)
             box = cv2.boxPoints(rect)
-            box = np.int0(box)
+            box = np.int_(box)
             cv2.drawContours(image_with_crack, [box], 0, (0, 0, 255), 2)  # Draw the rectangle in red
             # Identify bottom-left and top-right points
 
@@ -116,7 +116,7 @@ class CrackDetector:
         # Get the minimum area rectangle that bounds the crack
         rect = cv2.minAreaRect(crack_contour)
         box = cv2.boxPoints(rect)  # Get the four points of the bounding box
-        box = np.int0(box)  # Convert points to integers
+        box = np.int_(box)  # Convert points to integers
 
         width, height = rect[1]
         angle = self.calculate_crack_angle(crack_contour)
