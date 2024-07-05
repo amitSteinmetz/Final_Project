@@ -14,6 +14,7 @@ def execute_crack_detection(image_path, df,num_img):
 
 
 def main():
+    # test update #
     df = pd.DataFrame(columns=['N', 'a', 'w', 'z'])
     image_directory = r"C:\Users\Owner\PycharmProjects\Final_Project\data\0_0\0_0-2\2.1\0_0-2,1_1"
     image_paths = sorted(glob.glob(os.path.join(image_directory, '*.jpg')))
