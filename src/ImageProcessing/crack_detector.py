@@ -157,10 +157,7 @@ class CrackDetector:
         gray_image = cv2.normalize(gray_image, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
         gray_image = np.uint8(gray_image)
 
-
         blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
-
-
 
         edge_enhanced = cv2.subtract(gray_image, blurred_image)
         sobelx = cv2.Sobel(edge_enhanced, cv2.CV_64F, 1, 0, ksize=3)
@@ -169,13 +166,10 @@ class CrackDetector:
         ang = np.arctan2(sobely, sobelx)
         mag = self.orientated_non_max_suppression(mag, ang)
 
-
         threshold = 4 * self.fudgefactor * np.mean(mag)
         mag[mag < threshold] = 0
         kernel = np.ones((5, 5), np.uint8)
         mag = cv2.morphologyEx(mag.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
-
-
 
         contours, _ = cv2.findContours(mag, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         image_width_pixels = gray_image.shape[1]
@@ -200,18 +194,16 @@ class CrackDetector:
     def load_image(self, image_path):
         return Image.open(image_path)
 
-    def process_and_draw_cracks(self, df,num_img):
+    def process_and_draw_cracks(self, df, num_img):
         contours = self.detect_cracks()
         original_image = cv2.imread(self.image_path)
         image = self.load_image(self.image_path)
         gray_image_np = self.convert_to_gray(image)
 
-
         if original_image is not None:
             crack_length_pixels, x, end_x, image_with_measurement, lenOfCrack, lenOfWid, angle = self.measure_crack(
                 original_image, contours, 100, 34)
             new_row = {'N': num_img, 'a': lenOfCrack, 'w': lenOfWid, 'z': angle}
-
 
             if not pd.DataFrame([new_row]).isnull().all(axis=1).any():
                 if not df.empty:
@@ -224,7 +216,5 @@ class CrackDetector:
                  title = f"Image with Crack Contour number {num_img}"
                  plot_image_with_measurement(gray_image_np, image_with_measurement, crack_length_pixels, x, end_x,
                                              title)
-
-
 
         return original_image, df
