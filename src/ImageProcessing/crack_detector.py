@@ -5,14 +5,12 @@ import pandas as pd
 import scipy.ndimage
 from PIL import Image
 from visualization import plot_image, plot_image_with_measurement
-import matplotlib.pyplot as plt
-from skimage.morphology import skeletonize
 
 
 class CrackDetector:
     def __init__(self, image_path):
         self.image_path = image_path
-        self.fudgefactor = 5
+        self.fudgefactor = 4
         self.sigma = 200
         self.kernel = 2 * math.ceil(2 * self.sigma) + 1
 
@@ -137,6 +135,7 @@ class CrackDetector:
         cm_width_at_ends = round(cm_width_at_ends, 3)
 
         return angle, cm_length, cm_width_at_ends
+
     def annotate_image(self, image, x, y, angle, length, width):
         font_scale = 1.5
         vertical_gap = 60
