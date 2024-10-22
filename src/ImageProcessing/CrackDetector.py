@@ -1,266 +1,355 @@
 import glob
 import os
+import pandas as pd
 import cv2
 import numpy as np
 import math
 import scipy.ndimage
-from PIL import Image
-from matplotlib import pyplot as plt
-import pandas as pd
-from visualization import plot_image, plot_image_with_measurement
-# Define the CrackDetector class with additional methods to draw cracks and measure them
-
+import matplotlib.pyplot as plt
+import scipy.ndimage
+import matplotlib.pyplot as plt
+import tensorflow as tf
 
 class CrackDetector:
-    def __init__(self, image_path):
-        self.image_path = image_path
-        self.with_nmsup = True
-        self.fudgefactor = 4
-        self.sigma = 30
-        self.kernel = 2 * math.ceil(2 * self.sigma) + 1
-        # self.df = pd.DataFrame(columns=['N', 'a', 'w', 'z'])
-        self.num_img = 1
+    def _init_(self, image_path, fudge_factor=5, sigma=200):
+        self.image = self.load_and_preprocess_image(image_path)
+        self.fudge_factor = fudge_factor
+        self.sigma = sigma
+        self.kernel_size = 2 * math.ceil(2 * self.sigma) + 1
+
+    def load_and_preprocess_image(self, image_path, target_size=(2048, 2048)):
+        """Load and preprocess the image using TensorFlow operations."""
+        image = tf.io.read_file(image_path)
+        image = tf.image.decode_jpeg(image, channels=1)
+        image = tf.image.resize(image, target_size)
+        image = tf.image.convert_image_dtype(image, tf.float32)
+        return self.apply_preprocessing(image)
+
+    def apply_preprocessing(self, image):
+        """Convert TensorFlow tensor to a float32 NumPy array and normalize."""
+        image_np = image.numpy()  # Convert TF tensor to NumPy array
+        image_np = image_np / 255.0  # Normalize to range [0, 1] if not already
+        return image_np
+
+    def read_and_prepare_image(self):
+        """Prepare the image for processing."""
+        # Ensure the image is in the correct format and type for OpenCV operations
+        gray_image = (self.image * 255).astype(np.uint8)  # Scale to [0, 255] and convert to uint8
+        gray_image = cv2.normalize(gray_image, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+        gray_image = cv2.bilateralFilter(gray_image, 5, 75, 75)
+        return gray_image
+
+    # Additional methods would continue here...
+
+    def rotate_image(self,image, angle):
+        """
+        Rotates an image (clockwise) by a given angle around its center.
+
+        :param image: The image to rotate (numpy array).
+        :param angle: The angle in degrees. Positive values mean counter-clockwise rotation.
+        :return: The rotated image.
+        """
+        # Get the image dimensions (the last two dimensions)
+        height, width = image.shape[:2]
+
+        # Point to center the image
+        center = (width // 2, height // 2)
+
+        # Rotation matrix using OpenCV
+        # cv2.getRotationMatrix2D needs center, angle, scale
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # New dimensions of the image
+        cos = np.abs(matrix[0, 0])
+        sin = np.abs(matrix[0, 1])
+
+        # Compute the new bounding dimensions of the image
+        nWidth = int((height * sin) + (width * cos))
+        nHeight = int((height * cos) + (width * sin))
+
+        # Adjust the rotation matrix to take into account translation
+        matrix[0, 2] += (nWidth / 2) - center[0]
+        matrix[1, 2] += (nHeight / 2) - center[1]
+
+        # Perform the affine transformation (rotate the image)
+        rotated = cv2.warpAffine(image, matrix, (nWidth, nHeight))
+        return rotated
+    def read_and_prepare_image(self):
+        gray_image = self.image
+        if gray_image is None:
+            raise ValueError("Error loading the image.")
+
+        gray_image = cv2.normalize(gray_image, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+        gray_image = np.uint8(gray_image)
+        gray_image = cv2.bilateralFilter(gray_image, 5, 75, 75)
+        return gray_image
+
+    def apply_gaussian_blur(self, image):
+        return cv2.GaussianBlur(image, (5, 5), 0)
+
+    def detect_edges(self, image):
+        blurred_image = self.apply_gaussian_blur(image)
+        edge_enhanced = cv2.subtract(image, blurred_image)
+        sobelx = cv2.Sobel(edge_enhanced, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(edge_enhanced, cv2.CV_64F, 0, 1, ksize=3)
+        mag = np.hypot(sobelx, sobely)
+        mag = np.sqrt(sobelx ** 2 + sobely ** 2)
+        mag=cv2.convertScaleAbs(mag)
+        ang = np.arctan2(sobely, sobelx)
+        mag = self.orientated_non_max_suppression(mag, ang)
+        return mag
+
 
     def orientated_non_max_suppression(self, mag, ang):
         ang_quant = np.round(ang / (np.pi / 4)) % 4
-        winE = np.array([[0, 0, 0], [1, 1, 1], [0, 0, 0]])
-        winSE = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
-        winS = np.array([[0, 1, 0], [0, 1, 0], [0, 1, 0]])
-        winSW = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
-
-        magE = self.non_max_suppression(mag, winE)
-        magSE = self.non_max_suppression(mag, winSE)
-        magS = self.non_max_suppression(mag, winS)
-        magSW = self.non_max_suppression(mag, winSW)
-
-        mag[ang_quant == 0] = magE[ang_quant == 0]
-        mag[ang_quant == 1] = magSE[ang_quant == 1]
-        mag[ang_quant == 2] = magS[ang_quant == 2]
-        mag[ang_quant == 3] = magSW[ang_quant == 3]
+        windows = {
+            0: np.array([[0, 0, 0], [1, 1, 1], [0, 0, 0]]),
+            1: np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]]),
+            2: np.array([[0, 1, 0], [0, 1, 0], [0, 1, 0]]),
+            3: np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
+        }
+        for key, win in windows.items():
+            mag[ang_quant == key] = self.non_max_suppression(mag, win)[ang_quant == key]
         return mag
 
-    def non_max_suppression(self, data, win):
-        data_max = scipy.ndimage.filters.maximum_filter(data, footprint=win, mode='constant')
+    @staticmethod
+    def non_max_suppression(data, win):
+        data_max = scipy.ndimage.maximum_filter(data, footprint=win, mode='constant')
         data_max[data != data_max] = 0
         return data_max
 
-    def measure_crack(self,image_with_crack, crack_contour, real_worldW, real_worldH):
-        if crack_contour is not None:
-            x, y, w, h = cv2.boundingRect(crack_contour)
-            crack_length_pixels = max(w, h)
 
-            # Draw length measurement line
-            end_x = x + w
-            end_y = y + h // 2
-            line_length = 50  # Adjust if necessary
-            cv2.line(image_with_crack, (end_x, end_y), (end_x + line_length, end_y), (0, 255, 0), 2)
 
-            # Draw width measurement lines (vertical lines at the start and end of the crack)
-            cv2.line(image_with_crack, (x, y), (x, y + h), (255, 0, 0), 2)  # Start line
-            cv2.line(image_with_crack, (end_x, y), (end_x, y + h), (255, 0, 0), 2)  # End line
+    def threshold_and_close(self, mag):
+        threshold = 4 * self.fudge_factor * np.mean(mag)
+        mag[mag < threshold] = 0
+        kernel = np.ones((5, 5), np.uint8)
 
-            rect = cv2.minAreaRect(crack_contour)
-            box = cv2.boxPoints(rect)
-            box = np.int_(box)
+        return cv2.morphologyEx(mag.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
 
-            cv2.drawContours(image_with_crack, [box], 0, (0, 0, 255), 2)  # Draw the rectangle in red
+    def find_contours(self, processed_image, min_area=500, max_aspect_ratio=4, max_circularity=4, roi=None):
+        """
+        Finds and returns contours in the processed image that are larger than a specified minimum area,
+        are not predominantly vertical based on an aspect ratio threshold, and have a circularity below a given threshold.
 
-            # The angle from the rect is the angle the rectangle rotates clockwise about its center
-            # OpenCV defines the angle as the rotation needed such that the rectangle width is greater than the height
-            width, height = rect[1][0], rect[1][1]
-            angle = rect[2]
+        :param processed_image: The image from which contours are to be extracted.
+        :param min_area: The minimum area a contour must have to be included in the result.
+        :param max_aspect_ratio: The maximum aspect ratio (width/height) for a contour to be considered non-vertical.
+        :param max_circularity: The maximum circularity for a contour to be considered (helps ignore round objects).
+        :param roi: A tuple (x, y, width, height) defining the region of interest where cracks are expected.
+        :return: A list of contours that meet the area, aspect ratio, and circularity criteria.
+        """
+        # Find all contours in the image
+        contours, _ = cv2.findContours(processed_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            if width < height:
-                angle = 90 + angle  # Adjust angle for vertical orientation
-            else:
-                # For horizontal orientation, no adjustment needed, but you might want to normalize it
-                if angle < -45:
-                    angle = angle + 90
+        # If a region of interest (ROI) is provided, crop the processed image to that ROI
+        if roi is not None:
+            x_roi, y_roi, w_roi, h_roi = roi
+            contours = [contour for contour in contours if cv2.boundingRect(contour) == (x_roi, y_roi, w_roi, h_roi)]
 
-            # Optionally, convert angle to a range of [0, 180) for uniformity
-            angle = (angle + 180) % 180
+        # Filter contours based on area, aspect ratio, and circularity
+        filtered_contours = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > min_area:
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / float(h)
+                if aspect_ratio > max_aspect_ratio:  # Ensure the contour is not too vertical
+                    # Calculate the perimeter and circularity
+                    perimeter = cv2.arcLength(contour, True)
+                    circularity = 4 * np.pi * (area / (perimeter * perimeter)) if perimeter != 0 else 0
+                    if circularity < max_circularity:  # Filter out very circular (round) contours
+                        filtered_contours.append(contour)
 
-            # print(f"Adjusted Angle: {angle} degrees")
-            # Increase text size by adjusting the font scale parameter
-            font_scale = 1.0  # Adjust font scale if necessary
-
-            # Adjust the vertical position of the text to move it further above the crack
-            # and increase the gap between the two lines of text significantly
-            vertical_gap = 50  # Gap from the top of the crack to the first line of text
-            text_gap = 40  # Additional gap between the two lines of text
-            centimetersCrack = self.pixels_to_centimeters(crack_length_pixels, real_worldH, real_worldW, 2000)
-            lenOfCrack = round(centimetersCrack + 34-10, 3)
-            centimetersWidth = self.pixels_to_centimeters(min(w, h), real_worldH, real_worldW, 2000)
-            lenOfWid = round(centimetersWidth, 3)
-            # Adjust the vertical positions
-            cv2.putText(image_with_crack, f'Len: {round(centimetersCrack + 34, 3)}cm', (x, y - vertical_gap),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), 2)
-            # Increase the gap for the 'Wid' text by adding 'text_gap' to the previous vertical offset
-            cv2.putText(image_with_crack, f'Wid: {round(centimetersWidth, 3)}cm', (x, y - vertical_gap - text_gap),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), 2)
-            # Annotate the angle
-            cv2.putText(image_with_crack, f'Ang: {angle:.2f} deg', (x, y - vertical_gap - 2 * text_gap),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 255), 2)
-            return crack_length_pixels, x, end_x, image_with_crack, lenOfCrack, lenOfWid, angle
-        else:
-            return None, None, None, image_with_crack
-
-    def pixels_to_centimeters(self,pixels, start_cm, end_cm, total_pixels):
-        real_world_cm = end_cm - start_cm
-        pixels_per_cm = total_pixels / real_world_cm
-        return pixels / pixels_per_cm
+        return filtered_contours
 
     def detect_cracks(self):
 
-        # Read the image in grayscale as 8-bit image
-        gray_image = cv2.imread(self.image_path, cv2.IMREAD_GRAYSCALE)
+        gray_image = self.read_and_prepare_image()
+        mag = self.detect_edges(gray_image)
+        processed_image = self.threshold_and_close(mag)
+        contours = self.find_contours(processed_image)
+        return contours
 
-        # Optionally normalize and convert back to 8-bit
-        gray_image = cv2.normalize(gray_image, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-        gray_image = np.uint8(gray_image)
+    def visualize_ellipse(self,image_path, contour, ellipse):
+        image = self.image
+        # Draw the contour
+        cv2.drawContours(image, [contour], -1, (255, 0, 0), 2)  # Blue
+        # Draw the fitted ellipse
+        cv2.ellipse(image, ellipse, (0, 255, 0), 2)  # Green
 
-        # Apply Gaussian blur to reduce noise and improve edge detection
-        blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
+        plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        plt.title(f'Ellipse Angle: {ellipse[2]}')
+        plt.show()
 
-        # Subtract the blurred image from the original to enhance edges
-        edge_enhanced = cv2.subtract(gray_image, blurred_image)
+    def visualize_longest_contour1(self, image, longest_contour, image_number, angle):
 
-        # Apply Sobel filter to get the derivative in x and y direction
-        sobelx = cv2.Sobel(edge_enhanced, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(edge_enhanced, cv2.CV_64F, 0, 1, ksize=3)
+        """Draw the longest contour on the image and visualize it with start/end markers."""
 
-        # Compute the magnitude of the gradient
-        mag = np.hypot(sobelx, sobely)
+        contour_image = cv2.cvtColor(image.copy(), cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(contour_image, [longest_contour], -1, (0, 255, 0), 2)  # Draw longest contour in green
 
-        # Compute the orientation of the gradient
-        ang = np.arctan2(sobely, sobelx)
+        x, y, w, h = cv2.boundingRect(longest_contour)
+        start_x = x
+        end_x = x + w
+        longest_length = self.pixels_to_centimeters(end_x, 0, 2000, 34, 100) - 10
+        plt.figure(figsize=(20, 10))
+        plt.subplot(1, 2, 1)
+        plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for displaying
+        plt.title(f'Original Image #{image_number}')
+        plt.axis('on')  # Optionally display the axis
 
-        # Apply non-maximum suppression with orientation
-        mag = self.orientated_non_max_suppression(mag, ang)
 
-        # Set threshold to identify significant gradients
-        threshold = 4 * self.fudgefactor * np.mean(mag)
-        mag[mag < threshold] = 0
 
-        # Apply morphological closing to the thresholded image
-        kernel = np.ones((5, 5), np.uint8)  # You can adjust the size of the kernel
-        mag = cv2.morphologyEx(mag.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+        plt.subplot(1, 2, 2)
+        plt.imshow(cv2.cvtColor(contour_image, cv2.COLOR_BGR2RGB))
+        plt.title(f'Image #{image_number}: Detect Crack (Length: {longest_length:.3f} cm, Angle={angle:.2f}°)')
+        plt.axvline(x=start_x, color='red', linestyle='--', linewidth=2)
+        plt.axvline(x=end_x, color='red', linestyle='--', linewidth=2)
+        plt.axis('on')  # Optionally display the axis
 
-        # Find contours from the edges detected
-        contours, _ = cv2.findContours(mag, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # The width of the image in pixels
-        image_width_pixels = gray_image.shape[1]
 
-        # We'll assume that a contour that spans almost the entire width of the image is the crack
-        possible_cracks = [cnt for cnt in contours if cv2.arcLength(cnt, False) > image_width_pixels * 0.9]
+        plt.show()
 
-        # Sort possible cracks by their arc length to find the longest one
-        possible_cracks = sorted(possible_cracks, key=lambda cnt: cv2.arcLength(cnt, False), reverse=True)
+    def angle_from_min_area_rect_reactangle(self, contour):
+        rect = cv2.minAreaRect(contour)
+        angle = rect[2]  # Angle to the horizontal
 
-        # Take the longest contour as the crack
-        crack_contour = possible_cracks[0] if possible_cracks else None
+        # If the width is greater than the height, we adjust the angle.
+        # This is because cv2.minAreaRect could return a rectangle where the width is considered
+        # to be the smaller of the two sides (hence a negative angle up to -90 degrees).
+        # We adjust the angle to make it refer to the longer side of the rectangle.
+        if rect[1][0] > rect[1][1]:  # if width > height
+            angle = 90 + angle  # normalize angle to be from the longer side
 
-        # Draw the contour on the image
-        image_with_crack = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
-        if crack_contour is not None:
-            cv2.drawContours(image_with_crack, [crack_contour], -1, (255, 0, 0), 3)
+        return angle
+    def angle_from_min_area_rect(self, contour):
+        if len(contour) < 5:
+            print("Not enough points to fit an ellipse.")
+            return self.angle_from_min_area_rect_reactangle(contour)
 
-        # If a crack contour is found, find the bounding box and calculate its length
-        if crack_contour is not None:
-            # Find the bounding box of the contour to get the pixel length
-            x, y, w, h = cv2.boundingRect(crack_contour)
-            # Use the larger of the width or height as the crack's length in pixels
-            crack_length_pixels = max(w, h)
+        # Fit an ellipse to the contour
+        ellipse = cv2.fitEllipse(contour)
+        if ellipse[2]==0 :
+            return self.angle_from_min_area_rect_reactangle(contour)
 
-            # Display the image with the contour and measurements
-            # plt.figure(figsize=(10, 5))
-            # plt.imshow(image_with_crack)
-            # plt.axvline(x=x, color='r', linestyle='--')  # Vertical line at the start of the crack
-            # plt.axvline(x=x + w, color='r', linestyle='--')  # Vertical line at the end of the crack
-            # plt.title(f"Crack Length in Pixels: {crack_length_pixels}")
-            # plt.axis('off')
-            # plt.show()
+        # self.visualize_ellipse(self.image_path, contour,ellipse)
+
+
+
+        return ellipse[2]
+
+    def region_of_interest1(self,start_row, end_row, start_col, end_col):
+        """Extracts a region of interest from the loaded image."""
+        return self.image[start_row:end_row, start_col:end_col]
+
+    def find_crack_end_width(self,contour, orientation='horizontal'):
+        if orientation == 'horizontal':
+            # Sort the contour points based on the x-coordinate (horizontal orientation)
+            sorted_points = sorted(contour, key=lambda x: x[0][0])
         else:
-            crack_length_pixels = None
+            # Sort the contour points based on the y-coordinate (vertical orientation)
+            sorted_points = sorted(contour, key=lambda x: x[0][1])
 
-        # Output the crack length in pixels
-        return crack_contour
+        # Take the last few points which should be at the end of the crack
+        end_points = sorted_points[-10:]  # Taking last 10 points to average out any noise
 
-    def save_image_with_crack(self,original_image, image_with_crack, title, save_directory):
-        if not os.path.exists(save_directory):
-            os.makedirs(save_directory)
-        save_path = os.path.join(save_directory, f"{title}.png")
-        # Ensure original_image is in BGR if it was converted to grayscale and back
-        if len(original_image.shape) == 2 or original_image.shape[2] == 1:
-            original_image = cv2.cvtColor(original_image, cv2.COLOR_GRAY2BGR)
-        if len(image_with_crack.shape) == 2 or image_with_crack.shape[2] == 1:
-            image_with_crack = cv2.cvtColor(image_with_crack, cv2.COLOR_GRAY2BGR)
-        # Combine original and processed images side by side for comparison
-        combined_image = np.concatenate((original_image, image_with_crack), axis=1)
-        # Save the combined image
-        cv2.imwrite(save_path, combined_image)
-    def draw_crack(self, image_with_crack, crack_contour):
-        if len(image_with_crack.shape) == 2:
-            image_with_crack = cv2.cvtColor(image_with_crack, cv2.COLOR_GRAY2BGR)
-        if crack_contour is not None:
-            cv2.drawContours(image_with_crack, [crack_contour], -1, (0, 0, 255), 3)
-        return image_with_crack
-
-    def convert_to_gray(self,image):
-        if image.mode != 'L':
-            return cv2.cvtColor(np.array(image), cv2.COLOR_BGR2GRAY)
+        if orientation == 'horizontal':
+            # Get min and max y-values to find height at the end of the crack
+            min_y = min(end_points, key=lambda x: x[0][1])[0][1]
+            max_y = max(end_points, key=lambda x: x[0][1])[0][1]
         else:
-            return np.array(image)
+            # Get min and max x-values to find width at the end of the crack
+            min_x = min(end_points, key=lambda x: x[0][0])[0][0]
+            max_x = max(end_points, key=lambda x: x[0][0])[0][0]
 
-    def load_image(self,image_path):
-        return Image.open(image_path)
+        width_at_end = max_y - min_y if orientation == 'horizontal' else max_x - min_x
+        return width_at_end
 
-    def process_and_draw_cracks(self, df):
-        contours = self.detect_cracks()
+    def measure_contours(self, contours):
+        # Initialize default values in case there are no contours
+        features = {
+            'length': 0,  # Default length when no contours are detected
+            'width': 0,  # Default width when no contours are detected
+            'angle': 0  # Default angle when no contours are detected
+        }
+        if contours:
+            # Calculate arc lengths of all contours
+            lengths = [cv2.arcLength(contour, True) for contour in contours]
+            # Identify the longest contour
+            longest_contour = max(contours, key=lambda x: cv2.arcLength(x, True))
+            # Calculate the maximum length (if lengths are available)
+            longest_length = max(lengths) if lengths else 0
 
-        original_image = cv2.imread(self.image_path)
-        image = self.load_image(self.image_path)
-        gray_image_np = self.convert_to_gray(image)
-        num_img = 1
+            # Calculate the angle from the longest contour
+            angle = self.angle_from_min_area_rect(longest_contour)
+            # Calculate the width at the end of the longest contour
+            width = self.find_crack_end_width(longest_contour)
+            # Convert the width from pixels to centimeters
+            width_cm = self.pixels_to_centimeters(width, 0, 2000, 34, 100)
 
-        if original_image is not None:
-            crack_length_pixels, x, end_x, image_with_measurement, lenOfCrack, lenOfWid, angle = self.measure_crack(
-                original_image, contours, 100, 34)
-            new_row = {'N': num_img, 'a': lenOfCrack, 'w': lenOfWid, 'z': angle}
+            # Get the bounding rectangle to calculate length in cm
+            x, y, w, h = cv2.boundingRect(longest_contour)
+            end_x = x + w
+            longest_length_cm = self.pixels_to_centimeters(end_x, 0, 2000, 34, 100) - 10
 
-            if not pd.DataFrame([new_row]).isnull().all(axis=1).any():
-                if not df.empty:
-                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                else:
-                    df = pd.DataFrame([new_row])
+            # Update the features dictionary with actual measurements
+            features.update({
+                'length':  longest_length_cm,
+                'width':     width_cm,
+                'angle': angle
+            })
 
-            plot_image(np.array(image), original_image, title=f"Image with Crack Contour number {num_img}")
-            if crack_length_pixels is not None:
-                plot_image_with_measurement(gray_image_np, image_with_measurement, crack_length_pixels, x, end_x)
+        return features
 
-        num_img += 1
+    def convert_pixels_to_cm_width(self,width_in_pixels, total_pixels, physical_width_cm):
+        """
+        Converts a measurement from pixels to centimeters based on the total pixel width
+        corresponding to a known physical width in centimeters.
 
-        return original_image, df
+        :param width_in_pixels: The width in pixels to be converted.
+        :param total_pixels: Total number of pixels across the known physical width.
+        :param physical_width_cm: The physical width in centimeters that corresponds to the total pixels.
+        :return: The width in centimeters.
+        """
+        pixels_per_cm = total_pixels / physical_width_cm
+        width_in_cm = width_in_pixels / pixels_per_cm
+        return width_in_cm
 
-def execute_crack_detection(image_path, df):
+    def pixels_to_centimeters(self,pixel_position, pixel_range_start, pixel_range_end, cm_range_start, cm_range_end):
+        """
+        Convert pixel position to centimeters in the real world.
 
-    detector = CrackDetector(image_path)
-    image_with_cracks, df = detector.process_and_draw_cracks(df)
+        :param pixel_position: The pixel position to convert.
+        :param pixel_range_start: The starting pixel of the measurable range.
+        :param pixel_range_end: The ending pixel of the measurable range.
+        :param cm_range_start: The starting centimeter mark in the real world.
+        :param cm_range_end: The ending centimeter mark in the real world.
+        :return: The equivalent centimeter position in the real world.
+        """
+        # Calculate the number of pixels per centimeter
+        total_pixels = pixel_range_end - pixel_range_start
+        total_cm = cm_range_end - cm_range_start
+        pixels_per_cm = total_pixels / total_cm
 
-    return image_with_cracks, df
+        # Calculate the centimeter position corresponding to the given pixel position
+        cm_position = cm_range_start + (pixel_position - pixel_range_start) / pixels_per_cm
+        return cm_position
 
-df = pd.DataFrame(columns=['N', 'a', 'w', 'z'])
-image_path = "../../data/0_0/0_0-2/2.1/0_0-2,1_1/0_0-2,1_1_5507_20210429_16_15_36,629.jpg"
-image_directory = "../../data/0_0/0_0-2/2.1/0_0-2,1_1"
-image_paths = sorted(glob.glob(os.path.join(image_directory, '*.jpg')))
-for image_path in image_paths:
-    result_image_with_cracks,df = execute_crack_detection(image_path,df)
 
-    # result_image_with_cracks = cv2.cvtColor(result_image_with_cracks, cv2.COLOR_BGR2RGB)
-    # plt.imshow(result_image_with_cracks)
-    # plt.axis('off')  # Hide the axis
-    # plt.show()
-df.to_csv('output_filename.csv', index=False)
-df.to_excel('output_filename.xlsx', index=False, engine='openpyxl')
-print(df)
+    def visualize_process(self):
+        """Visualize each step of the process for understanding and debugging."""
+        original = self.image
+        gray_image = self.rotate_image(original, 0)  # Example: No rotation
+        blurred = self.apply_gaussian_blur(gray_image)
+        mag= self.detect_edges(blurred)
+        processed_image = self.threshold_and_close(mag)
+
+        plt.figure(figsize=(10, 8))
+        plt.subplot(221); plt.imshow(original, cmap='gray'); plt.title('Original Image')
+        plt.subplot(222); plt.imshow(blurred, cmap='gray'); plt.title('Blurred Image')
+        plt.subplot(223); plt.imshow(mag, cmap='gray'); plt.title('Edge Enhanced Image')
+        plt.subplot(224); plt.imshow(processed_image, cmap='gray'); plt.title('Thresholded and Closed Image')
+        plt.tight_layout()
+        plt.show()
